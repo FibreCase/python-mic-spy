@@ -28,6 +28,9 @@ def test_48k_input_keeps_model_at_16k_and_archive_sample_positions(monkeypatch):
             return True
         def get_result(self, stream):
             return '采样位置'
+        def reset(self, stream):
+            assert stream is streams[0]
+            self.resets = getattr(self, 'resets', 0) + 1
     def factory(**kwargs):
         config.update(kwargs)
         return Engine()
@@ -38,9 +41,13 @@ def test_48k_input_keeps_model_at_16k_and_archive_sample_positions(monkeypatch):
     assert config['sample_rate'] == 16000
     assert streams[0].calls == [(48000,4800)]
     assert result.end_sample == 4800
+    second = recognizer.accept(np.zeros(4800,dtype='<i2').tobytes())[0]
+    assert (second.start_sample, second.end_sample) == (4800,9600)
     recognizer.finish('shutdown')
-    assert streams[1].calls == [(48000,24000)]
-    assert recognizer.position == 4800
+    assert len(streams) == 1
+    assert streams[0].calls == [(48000,4800),(48000,4800),(48000,24000)]
+    assert recognizer.recognizer.resets == 2
+    assert recognizer.position == 9600
 
 
 def test_transport_defaults_48k():

@@ -36,7 +36,8 @@ class SherpaRecognizer:
         if self.recognizer.is_endpoint(self.stream):
             result = self._result('endpoint')
             self.start = self.position
-            self.stream = self.recognizer.create_stream()
+            # Reset decoding state while preserving the feature extractor/resampler.
+            self.recognizer.reset(self.stream)
             return result
         return []
 
