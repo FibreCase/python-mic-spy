@@ -2,7 +2,7 @@
 import io
 import sqlite3
 import wave
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response, FileResponse
@@ -11,7 +11,12 @@ from .query import connect, export_clip
 
 
 def timestamp(value):
-    return datetime.fromtimestamp(value / 1e9, timezone.utc).isoformat()
+    return (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=int(value)//1000)).isoformat()
+
+
+def datetime_ns(value):
+    delta = value.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1000
 
 
 def serialize(row):
@@ -70,10 +75,10 @@ def create_app(data: Path, web_dist: Path | None = None):
             raise HTTPException(422, '开始时间必须早于结束时间')
         if start:
             clauses.append('end_ns>?')
-            params.append(int(start.timestamp()*1e9))
+            params.append(datetime_ns(start))
         if end:
             clauses.append('start_ns<?')
-            params.append(int(end.timestamp()*1e9))
+            params.append(datetime_ns(end))
         if session_id:
             clauses.append('session_id=?')
             params.append(session_id)
@@ -100,20 +105,20 @@ def create_app(data: Path, web_dist: Path | None = None):
             raise HTTPException(422, '开始时间必须早于结束时间')
         # Calculate times from samples; silent audio has the same timeline as speech.
         base = """SELECT r.*,s.sample_rate,
-            s.started_ns + (r.start_sample * 1000000000 / s.sample_rate) AS start_ns,
-            s.started_ns + (r.end_sample * 1000000000 / s.sample_rate) AS end_ns
+            (s.started_ns / 1000 + (r.start_sample * 1000000000 / s.sample_rate) / 1000) * 1000 AS start_ns,
+            (s.started_ns / 1000 + (r.end_sample * 1000000000 / s.sample_rate) / 1000) * 1000 AS end_ns
             FROM recordings r JOIN sessions s ON s.id=r.session_id
             WHERE r.end_sample > r.start_sample"""
         clauses, params = [], []
         if start:
             clauses.append('end_ns>?')
-            params.append(int(start.timestamp()*1e9))
+            params.append(datetime_ns(start))
         if end:
             clauses.append('start_ns<?')
-            params.append(int(end.timestamp()*1e9))
+            params.append(datetime_ns(end))
         if at:
             clauses.extend(['start_ns<=?', 'end_ns>?'])
-            params.extend([int(at.timestamp()*1e9)]*2)
+            params.extend([datetime_ns(at)]*2)
         where = ' WHERE '+ ' AND '.join(clauses) if clauses else ''
         db = database()
         try:
@@ -127,7 +132,7 @@ def create_app(data: Path, web_dist: Path | None = None):
                 item.pop('path')
                 item['audio_url'] = f'/api/recordings/{row["id"]}/audio'
                 item['closed'] = bool(row['closed'])
-                item['seek_seconds'] = (int(at.timestamp()*1e9)-row['start_ns'])/1e9 if at else 0
+                item['seek_seconds'] = (datetime_ns(at)-row['start_ns'])/1e9 if at else 0
                 items.append(item)
             return {'items':items, 'total':total, 'limit':limit, 'offset':offset}
         finally:
