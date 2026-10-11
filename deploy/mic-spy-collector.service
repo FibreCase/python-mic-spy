@@ -1,0 +1,19 @@
+[Unit]
+Description=Microphone Opus UDP collector
+Wants=network-online.target
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+User=micspy
+SupplementaryGroups=audio
+WorkingDirectory=/opt/mic-spy
+# Replace the destination with your processor address.
+ExecStart=/opt/mic-spy/.venv/bin/mic-spy collector --device plughw:0,0 --target udp://192.168.1.100:5000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

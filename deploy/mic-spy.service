@@ -1,0 +1,18 @@
+[Unit]
+Description=Continuous microphone recording and recognition
+After=sound.target
+
+[Service]
+Type=simple
+User=micspy
+SupplementaryGroups=audio
+WorkingDirectory=/opt/mic-spy
+ExecStart=/opt/mic-spy/.venv/bin/mic-spy --data /var/lib/mic-spy run --model /opt/mic-spy/sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01/model.int8.onnx --tokens /opt/mic-spy/sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01/tokens.txt --device plughw:0,0
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=mic-spy
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

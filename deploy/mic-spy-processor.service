@@ -1,0 +1,18 @@
+[Unit]
+Description=UDP microphone recognition and archive processor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=micspy
+WorkingDirectory=/opt/mic-spy
+ExecStart=/opt/mic-spy/.venv/bin/mic-spy --data /var/lib/mic-spy processor --listen udp://0.0.0.0:5000
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=mic-spy
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

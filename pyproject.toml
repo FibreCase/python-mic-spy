@@ -1,0 +1,29 @@
+[project]
+name = "mic-spy"
+version = "0.1.0"
+description = "Continuous ALSA recording with sample-indexed streaming ASR and SQLite archive"
+readme = "README.md"
+authors = [
+    { name = "FibreCase", email = "fibrecase@163.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.143.0",
+    "numpy>=2.4.6",
+    "sherpa-onnx==1.13.8",
+    "sherpa-onnx-core==1.13.8",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+mic-spy = "mic_spy:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+]

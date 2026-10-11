@@ -1,0 +1,15 @@
+[Unit]
+Description=Mic Spy web dashboard and HTTP API
+After=network.target
+
+[Service]
+Type=simple
+User=micspy
+WorkingDirectory=/opt/mic-spy
+ExecStart=/opt/mic-spy/.venv/bin/mic-spy --data /var/lib/mic-spy serve --host 0.0.0.0 --port 8000 --web-dist /opt/mic-spy/web/dist
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
