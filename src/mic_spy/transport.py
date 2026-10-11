@@ -20,17 +20,17 @@ def udp_url(value: str, *, receive=False, timeout=15):
     return urlunsplit((parsed.scheme, parsed.netloc, '', urlencode(options), ''))
 
 
-def collector_command(device, target, bitrate='24k'):
+def collector_command(device, target, bitrate='24k', sample_rate=48000):
     return ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
-            '-f', 'alsa', '-sample_rate', '16000', '-channels', '1', '-i', device,
+            '-f', 'alsa', '-sample_rate', str(sample_rate), '-channels', '1', '-i', device,
             '-c:a', 'libopus', '-application', 'voip', '-b:a', bitrate,
             '-frame_duration', '20', '-flush_packets', '1', '-f', 'mpegts', target]
 
 
-def receiver_command(listen):
+def receiver_command(listen, sample_rate=48000):
     return ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
             '-f', 'mpegts', '-i', listen, '-map', '0:a:0',
-            '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']
+            '-ac', '1', '-ar', str(sample_rate), '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']
 
 
 def terminate(process):
@@ -43,9 +43,9 @@ def terminate(process):
         process.wait()
 
 
-def transmit(device, target, bitrate, stop):
+def transmit(device, target, bitrate, stop, sample_rate=48000):
     """Run one sender attempt; the CLI supervises restarts."""
-    process = subprocess.Popen(collector_command(device, target, bitrate))
+    process = subprocess.Popen(collector_command(device, target, bitrate, sample_rate))
     try:
         while not stop.wait(0.2):
             code = process.poll()
@@ -56,13 +56,12 @@ def transmit(device, target, bitrate, stop):
 
 
 class FFmpegUdpSource:
-    sample_rate = 16000
-
-    def __init__(self, listen):
-        self.process = subprocess.Popen(receiver_command(listen), stdout=subprocess.PIPE)
+    def __init__(self, listen, sample_rate=48000):
+        self.sample_rate = sample_rate
+        self.process = subprocess.Popen(receiver_command(listen, sample_rate), stdout=subprocess.PIPE)
 
     def read(self):
-        return self.process.stdout.read(3200)
+        return self.process.stdout.read(self.sample_rate // 10 * 2)
 
     def close(self):
         terminate(self.process)

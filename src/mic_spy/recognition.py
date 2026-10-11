@@ -4,14 +4,14 @@ from .contracts import Transcript
 
 
 class SherpaRecognizer:
-    def __init__(self, model: Path, tokens: Path, threads=2, max_utterance=20, sample_rate=16000):
+    def __init__(self, model: Path, tokens: Path, threads=2, max_utterance=20, sample_rate=48000):
         import numpy as np
         import sherpa_onnx
         self.np = np
         self.sample_rate = sample_rate
         self.recognizer = sherpa_onnx.OnlineRecognizer.from_zipformer2_ctc(
             model=str(model), tokens=str(tokens), num_threads=threads,
-            sample_rate=sample_rate, enable_endpoint_detection=True,
+            sample_rate=16000, enable_endpoint_detection=True,
             rule3_min_utterance_length=max_utterance)
         self.stream = self.recognizer.create_stream()
         self.start = self.position = 0

@@ -3,15 +3,14 @@ import subprocess
 
 
 class AlsaSource:
-    sample_rate = 16000
-
-    def __init__(self, device='plughw:0,0'):
+    def __init__(self, device='plughw:0,0', sample_rate=48000):
+        self.sample_rate = sample_rate
         self.process = subprocess.Popen(
             ['arecord', '-D', device, '-t', 'raw', '-f', 'S16_LE',
              '-r', str(self.sample_rate), '-c', '1'], stdout=subprocess.PIPE)
 
     def read(self) -> bytes:
-        return self.process.stdout.read(3200)
+        return self.process.stdout.read(self.sample_rate // 10 * 2)
 
     def close(self):
         if self.process.poll() is None:

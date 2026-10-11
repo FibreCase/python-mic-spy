@@ -28,13 +28,13 @@ def test_real_opus_udp_decodes_pcm_and_stops():
     source = FFmpegUdpSource(udp_url(f'udp://127.0.0.1:{port}', receive=True, timeout=3))
     sender = subprocess.Popen([
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-re',
-        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=16000',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
         '-ac', '1', '-c:a', 'libopus', '-b:a', '24k', '-flush_packets', '1',
         '-f', 'mpegts', udp_url(f'udp://127.0.0.1:{port}')])
     try:
         with ThreadPoolExecutor() as executor:
             data = executor.submit(source.read).result(timeout=12)
-        assert len(data) == 3200
+        assert len(data) == 9600
         assert any(data)
     finally:
         terminate(sender)

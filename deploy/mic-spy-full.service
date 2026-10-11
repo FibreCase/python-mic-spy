@@ -1,0 +1,20 @@
+[Unit]
+Description=Mic Spy recording recognition archive and web
+Wants=network-online.target
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+User=micspy
+SupplementaryGroups=audio
+WorkingDirectory=/opt/mic-spy
+# Use --source udp --listen udp://0.0.0.0:5000 for a network processor.
+ExecStart=/opt/mic-spy/.venv/bin/mic-spy --data /var/lib/mic-spy full --source local --device plughw:0,0 --sample-rate 48000 --host 0.0.0.0 --web-dist /opt/mic-spy/web/dist
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=mic-spy
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
