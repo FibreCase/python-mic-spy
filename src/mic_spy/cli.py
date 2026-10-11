@@ -53,6 +53,8 @@ def main():
         command.add_argument('--host', default='127.0.0.1')
         command.add_argument('--port', type=int, default=8000)
         command.add_argument('--web-dist', type=Path, default=Path('web/dist'))
+        command.add_argument('--web-source', type=Path, default=Path('web'))
+        command.add_argument('--no-build', action='store_true', help='Skip automatic npm build and use existing frontend')
     query = commands.add_parser('query')
     query.add_argument('--text',default='')
     query.add_argument('--limit',type=int,default=50)
@@ -66,6 +68,7 @@ def main():
         from .api import create_app
         if not 1 <= args.port <= 65535:
             parser.error('Port must be between 1 and 65535')
+        prepare_web(args, parser)
         uvicorn.run(create_app(args.data, args.web_dist), host=args.host, port=args.port)
     elif args.command == 'export':
         export_clip(args.data,args.id,args.output)
@@ -121,6 +124,7 @@ def main():
             run_session(source, recognizer, archive, stop, anchor_on_first_audio=network)
         try:
             if args.command == 'full':
+                prepare_web(args, parser)
                 run_full(attempt, stop, args)
             else:
                 supervise(attempt, stop)
@@ -149,7 +153,7 @@ def run_full(attempt, stop, args):
     web = subprocess.Popen([
         sys.executable, '-m', 'mic_spy', '--data', str(args.data.resolve()),
         'serve', '--host', args.host, '--port', str(args.port),
-        '--web-dist', str(args.web_dist.resolve())])
+        '--web-dist', str(args.web_dist.resolve()), '--no-build'])
     web_failed = threading.Event()
 
     def monitor():
@@ -170,3 +174,13 @@ def run_full(attempt, stop, args):
         stop.set()
         terminate(web)
         watcher.join(timeout=1)
+
+
+def prepare_web(args, parser):
+    if args.no_build:
+        return
+    from .web_build import build_web
+    try:
+        build_web(args.web_source, args.web_dist)
+    except (RuntimeError, OSError) as exc:
+        parser.error(str(exc))

@@ -1,65 +1,156 @@
 # mic-spy
 
-Armbian 上持续保存麦克风音频，通过 sherpa-onnx Zipformer2 CTC 实时识别中文，将句段写入 SQLite。使用你已测试的模型和 `plughw:0,0`。暂不包含 Web 面板。
+持续采集麦克风声音，实时识别中文，将录音与文字关联保存，并通过 Web 面板检索、回放。
 
-## 两台设备：采集者 / 处理者
+支持 Armbian 本机运行，也支持将麦克风采集与识别存储部署到两台设备。默认 **48 kHz 单声道采集、每分钟集中写盘、保留 7 天**。前端使用 React + Vite，HTTP API 使用 FastAPI，识别使用 sherpa-onnx Zipformer2 CTC。
 
-两端都安装项目和 FFmpeg：
+## 1. 安装与准备
+
+在项目根目录运行：
 
 ```sh
-sudo apt-get install ffmpeg
+sudo apt-get install alsa-utils ffmpeg
 uv sync --locked --no-dev
 ```
 
-先在处理设备启动（模型目录放在处理端）：
+需要 Python 3.11+、uv 和支持设备架构的 sherpa-onnx wheel。使用 Web 时还需 Node.js 20.19+ 或 22.12+ 及 npm；采集者无需加载模型，但目前各角色共用同一套 Python 依赖。
+
+检查麦克风及 Opus 编码器：
 
 ```sh
-uv run mic-spy --data ./data processor --listen udp://0.0.0.0:5000
+arecord -l
+ffmpeg -hide_banner -h encoder=libopus
 ```
 
-再在 Armbian 采集设备启动，将地址替换成处理设备的局域网 IP：
+当前设备使用 `plughw:0,0`。识别端需要已有模型目录：
 
-```sh
-uv run mic-spy collector --device plughw:0,0 --target udp://192.168.1.100:5000
+```text
+sherpa-onnx-streaming-zipformer-small-ctc-zh-int8-2025-04-01/
+├── model.int8.onnx
+└── tokens.txt
 ```
 
-采集者仅启动 FFmpeg：ALSA → 48kHz 单声道 → Opus（默认 24000 bit/s，20ms 帧）→ MPEG-TS → UDP，不加载识别模型、不建立数据库。可用 `--bitrate 32000` 修改码率。处理者启动 FFmpeg 接收并解码为 48kHz int16 PCM，随后通过原有识别、存储模块写入 WAV 和 SQLite。查询与导出命令不变。Python 依赖目前共用同一安装集合，采集身份不会导入 numpy 或 sherpa 的模型运行库。
-
-处理端需允许所选 UDP 端口。一个监听端口只对应一个采集端；多设备应分配不同端口、数据目录及处理进程。采集端 FFmpeg 需支持 ALSA、libopus，可运行 `ffmpeg -h encoder=libopus` 检查编码器。现有 `run` 命令仍用于在同一设备直接采集和识别。
-
-处理端默认 15 秒没有 UDP 包会退出接收并在 5 秒后重试，可通过 `--receive-timeout 30` 修改。每次重试创建新的录音会话。采集端也会在 FFmpeg 退出后重试；UDP 没有确认机制，发送进程正常不代表处理端已收到。两端 SIGTERM/Ctrl+C 都会关闭其 FFmpeg 子进程。
-
-**当前是实时传输版**：没有采集端本地缓存、断网补传、采集端会话元数据或加密认证。使用受信任的局域网。处理端保存的是 Opus 解码后的音频，不是采集端原始 PCM。
-
-网络模式下，数据库的 UTC 起点是处理端收到第一块解码音频的时间，之后按采样计数。文字与处理端保存音频的回放位置对应，但不能作为采集设备的精确墙钟时间。UDP 丢包或短暂中断可能产生丢失或时间压缩；只有触发超时重启的中断才分成独立会话。接收缓冲溢出默认报错重启，不静默继续。长期完整归档需要后续增加本地缓存、补传和采集时间元数据。
-
-两端 systemd 示例分别在 `deploy/mic-spy-collector.service`、`deploy/mic-spy-processor.service`。采集端修改目标 IP，处理端修改模型路径或把模型放在 `/opt/mic-spy` 下。按下文创建用户、安装对应服务：
+将目录放到项目根目录，程序即可使用默认路径。放在其他位置时，在 `run`、`processor` 或 `full` 命令后加：
 
 ```sh
-# 采集端
-sudo cp deploy/mic-spy-collector.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mic-spy-collector
-
-# 处理端
-sudo cp deploy/mic-spy-processor.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mic-spy-processor
+--model /模型目录/model.int8.onnx --tokens /模型目录/tokens.txt
 ```
 
-## 启动
+以下命令均在项目根目录运行；相对路径以当前工作目录为准。全局参数 `--data` 必须放在子命令之前。
 
-需要 64 位 Linux、Python 3.11+、uv，以及支持该架构的 sherpa-onnx wheel。先将已有模型目录复制到项目根目录。
+## 2. 快速启动
+
+### 同一台设备：全部功能
 
 ```sh
-sudo apt-get install alsa-utils
-uv sync --locked
+uv run mic-spy --data ./data full \
+  --device plughw:0,0 --host 0.0.0.0
+```
+
+这会启动本机录音、识别、存储、Web 和 API。浏览器访问 `http://设备IP:8000`。前端自动安装依赖并构建，无需手动运行 npm。
+
+### 两台设备：采集者 + 处理者
+
+先在处理设备放好模型并启动：
+
+```sh
+uv run mic-spy --data ./data full --source udp \
+  --listen udp://0.0.0.0:5000 --host 0.0.0.0
+```
+
+再在 Armbian 采集设备启动，将示例 IP 替换成处理设备地址：
+
+```sh
+uv run mic-spy collector \
+  --device plughw:0,0 --target udp://192.168.1.100:5000
+```
+
+采集端不需要模型。处理端保存音频、识别文字并提供 Web。网络路径为：
+
+```text
+麦克风 → 48 kHz 采集 → Opus / MPEG-TS → UDP
+                                        ↓
+                      解码 → 识别 → WAV + SQLite → Web/API
+```
+
+处理端需允许 UDP 5000 和 Web 的 TCP 8000。每个采集端使用独立监听端口、数据目录和处理进程。
+
+## 3. 单功能启动
+
+| 命令 | 功能 | 需要模型 | 自动构建 Web |
+| --- | --- | --- | --- |
+| `collector` | 采集、Opus 编码、UDP 发送 | 否 | 否 |
+| `processor` | UDP 接收、识别、存储 | 是 | 否 |
+| `run` | 本机采集、识别、存储 | 是 | 否 |
+| `serve` | Web 面板、HTTP API | 否 | 是 |
+| `full` | 本机或 UDP 音频处理，以及 Web/API | 是 | 是 |
+| `query` / `export` | 命令行检索 / 回放导出 | 否 | 否 |
+
+```sh
+# 本机录音与识别，不启动 Web
 uv run mic-spy --data ./data run --device plughw:0,0
+
+# 只接收、识别和存储
+uv run mic-spy --data ./data processor --listen udp://0.0.0.0:5000
+
+# 只启动 Web/API
+uv run mic-spy --data ./data serve --host 0.0.0.0
 ```
 
-可通过 `--model`、`--tokens` 指定绝对路径；`--threads 2` 设置推理线程，`--segment-seconds 300` 设置 WAV 分段长度。音频与识别文字默认缓存在内存中，每 60 秒集中写入一次。Ctrl+C 或 SIGTERM 会立即保存剩余音频及最后的识别结果并关闭音频文件。
+分开运行处理和 Web 时，两者的 `--data` 必须指向同一目录。`serve` 不创建数据库或录音，尚无数据库时页面会提示无法读取档案。
 
-## 查询和回放
+同一数据目录只能有一个录音处理实例。运行 `full` 时，不要再针对该目录启动 `run` 或 `processor`，也不要在同一 Web 端口启动另一个 `serve`。
+
+## 4. 配置参数
+
+### 采集与处理
+
+| 参数 | 默认值 | 适用命令 / 说明 |
+| --- | --- | --- |
+| `--data` | `./data` | 全局参数，放在子命令前 |
+| `--sample-rate` | `48000` | `collector`、`run`、`processor`、`full`；支持 8000、12000、16000、24000、48000 |
+| `--device` | `plughw:0,0` | `collector`、`run`、`full --source local` |
+| `--target` | 必填 | `collector`；例如 `udp://192.168.1.100:5000` |
+| `--bitrate` | `24000` | `collector`；Opus 码率，单位 bit/s |
+| `--listen` | `udp://0.0.0.0:5000` | `processor`、`full --source udp` |
+| `--receive-timeout` | `15` | UDP 接收无数据超时，单位秒 |
+| `--source` | `local` | `full`；可选 `local`、`udp` |
+| `--model` / `--tokens` | 上述模型目录内的文件 | `run`、`processor`、`full` |
+| `--threads` | `2` | 识别推理线程数 |
+| `--max-utterance` | `20` | 最长识别句段，单位秒 |
+| `--segment-seconds` | `300` | WAV 文件分段长度，单位秒 |
+| `--flush-seconds` | `60` | 音频与文字批量写入间隔，单位秒 |
+| `--retention-days` | `7` | 录音及关联文字保留天数 |
+
+识别、存储参数适用于 `run`、`processor`、`full`。网络两端建议设置相同采样率，处理端会将收到的音频转换为指定录音采样率。识别模型的特征采样率保持 16 kHz，由 sherpa-onnx 内部重采样；文字定位使用录音的采样率。旧的 16 kHz 录音仍可直接回放。
+
+### Web 与自动构建
+
+以下参数适用于 `serve`、`full`：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | `0.0.0.0` 允许局域网访问 |
+| `--port` | `8000` | HTTP 端口 |
+| `--web-source` | `web` | 前端源目录 |
+| `--web-dist` | `web/dist` | 前端构建输出 / 静态文件目录 |
+| `--no-build` | 不启用 | 使用已有构建结果，或仅运行 API |
+
+默认启动前执行 `npm run build`。首次运行、依赖配置变化或依赖缺失时，先执行 `npm ci --include=dev`。安装或构建失败会退出，不继续启动服务；`full` 只构建一次。构建完成后由 Python 提供静态页面，无需 Node.js 常驻。
+
+预先构建部署示例：
+
+```sh
+npm --prefix web ci
+npm --prefix web run build
+uv run mic-spy --data ./data serve --no-build --host 0.0.0.0
+```
+
+## 5. 查询与回放
+
+Web 支持关键词、时间范围、分页、档案统计、音频回放及下载，每分钟自动刷新。时间显示为浏览器本地时区。
+
+命令行查询输出 JSON 行，`export` 按文字 ID 导出句段，可跨越 WAV 文件边界：
 
 ```sh
 uv run mic-spy --data ./data query --text 测试 --limit 20
@@ -67,140 +158,115 @@ uv run mic-spy --data ./data export 1 ./clip.wav
 aplay ./clip.wav
 ```
 
-查询输出 JSON 行，含文字、UTC Unix 纳秒起止时间和会话内采样位置。`export` 按文字 ID 导出完整句段，可以跨越 WAV 文件边界。查询支持中文子串。后续面板可将纳秒转换成本地时间，并根据 ID 提供回放。
+HTTP API 文档在 `http://设备IP:8000/docs`：
 
-## 数据结构与时间语义
-
-- `data/archive.sqlite3`：WAL 模式数据库，支持采集时另开只读连接查询。
-- `sessions`：会话 UUID、UTC 开始时间、采样率、状态。每次重连/重启产生新会话。
-- `recordings`：相对数据目录的 WAV 路径、会话内起止采样位置、关闭标志。
-- `transcripts`：最终文字、句段起止采样、UTC 纳秒时间、结束原因。
-- `data/audio/<session>/<start_sample>.wav`：默认 48kHz 单声道 16 位 PCM，包括静音。
-
-所有区间均为左闭右开。文字对应的是识别句段，包含端点判断的静音，**不是逐字时间戳**。端点默认尾部静音 1.2/2.4 秒，最长句段约 20 秒。UTC 时间由会话开始时的系统时间加采样时长计算，不受会话中系统时钟跳变影响；音频内定位以采样位置为准。UTC 起点包含设备启动/缓冲延迟，不能视为硬件级精确时间；建议配置 NTP。
-
-音频读取使用独立线程，推理队列约容纳 10 秒。队列拥塞或 ALSA 退出会记录错误并重建会话，不会把中断伪装为连续音频。识别或磁盘写入长期跟不上时需降低线程争用或改用性能更好的设备。捕获错误和服务停止时，队列中尚未处理的数据可能丢失。突然断电或进程崩溃时，最近约一分钟的内存数据可能丢失，只有已写入文件/数据库的内容可恢复；WAV 每次批量写入刷新头部，启动会修复未关闭分段的数据库结束位置。文件与数据库不是跨介质原子事务，硬断电损坏文件可能需要人工修复。
-
-## systemd 常驻部署
-
-将项目及模型放到 `/opt/mic-spy`，先在该目录运行 `uv sync --locked --no-dev`。服务直接使用虚拟环境，运行时不下载依赖。
-
-```sh
-sudo useradd --system --no-create-home --groups audio micspy
-sudo cp deploy/mic-spy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mic-spy
-sudo journalctl -u mic-spy -f
-```
-
-`micspy` 需能读取项目、虚拟环境和模型目录；若自定义目录或设备，修改 service 中路径。systemd 自动创建 `/var/lib/mic-spy` 并赋予服务用户写权限。请先以前台方式确认模型可加载及 ALSA 设备可用。
-
-## 容量与边界
-
-原始 PCM 每天约 8.29 GB（7.72 GiB）。默认保留最近 7 天录音，启动时及运行中每小时自动清理过期的已关闭 WAV 分段和关联文字。连续录音约需 58.06 GB（54.1 GiB），部署时仍需预留容量并监控磁盘。磁盘满会报错重试。只有一个采集实例可使用同一数据目录，不能同时运行前台与服务；后续 Web 面板应只读数据库、不要创建 Archive。
-
-本地测试：`uv run pytest`。存储及跨文件回放可在 Mac 验证，实际采集必须在目标 Armbian 上测试。
-
-## 模块划分
-
-| 模块 | 职责 |
+| 接口 | 功能 |
 | --- | --- |
-| `source.py` / `AlsaSource` | 从 ALSA 读取音频，只输出单声道 int16 PCM |
-| `recognition.py` / `SherpaRecognizer` | 接收 PCM，输出含采样区间的识别句段，不读写数据库 |
-| `storage.py` / `Archive` | 保存 WAV 分段、会话信息与识别文字，不依赖识别器 |
-| `query.py` | 只读文字检索、跨文件回放导出，可供后续 Web 面板调用 |
-| `transport.py` | FFmpeg 编码发送、UDP 解码来源及进程关闭 |
-| `runtime.py` / `run_session` | 串联组件，管理队列和会话关闭 |
-| `contracts.py` | 音频来源、识别器、存储接口及 `Transcript` 数据类型 |
-| `cli.py` | 解析命令、创建组件、处理信号与重试 |
+| `GET /api/health` | 服务状态及数据库是否存在 |
+| `GET /api/stats` | 句段数量、录音时长、最早与最新记录 |
+| `GET /api/transcripts` | 检索；支持 `text`、`start`、`end`、`session_id`、`limit`（1–100）、`offset` |
+| `GET /api/transcripts/{id}/audio` | WAV 回放，支持字节范围请求 |
 
-替换声音来源或识别方案时，实现 `contracts.py` 对应接口并在入口组装即可。`run_session` 不依赖 ALSA 或 sherpa-onnx 的具体实现。音频格式固定为单声道、little-endian int16 PCM，声音来源与识别器采样率须一致；存储与识别器接收同一份音频，所有识别区间从会话采样 0 开始计数。
+`start`、`end` 使用带时区的 ISO 8601 时间，匹配与指定范围重叠的句段。纳秒字段以字符串输出，避免 JavaScript 精度损失。API 使用只读数据库连接，回放在内存中生成，不新增磁盘文件。缺失文字返回 404，缺失或不完整音频返回 410；单次回放上限 10 分钟，超出时使用命令行导出。
 
-## 录音自动管理
+## 6. 录音管理与时间定位
 
-`run` 和 `processor` 默认启用 7 天保留策略，无需额外服务或计划任务；`collector` 不在本地保存录音，因此不执行清理。可调整保留天数，例如：
+### 每分钟写盘
+
+音频和文字先缓存在内存中，每 60 秒集中写入 WAV，并通过一个 SQLite 事务提交文字及录音索引。正常停止或捕获异常退出时立即保存剩余缓存；初始化、会话创建及过期清理仍会写盘。
+
+48 kHz 下每分钟音频缓存约 5.76 MB。查询只能看到已提交的数据，最新文字可能延迟约一分钟。WAV 默认每 5 分钟分段，与写盘间隔独立。突然断电或强制结束进程可能丢失最近一分钟的缓存；退出时尚未处理的采集队列数据也可能丢失。
+
+### 自动保留 7 天
+
+启动时及运行中每小时检查一次。分段结束时间严格早于“当前 UTC 时间减去保留天数”时，删除已关闭 WAV 及与其重叠的文字；跨分段句子也会清理。正在写入的文件及跨越截止时间的分段暂时保留。
+
+空的历史会话和目录会清理。文件删除失败会记录日志，下一次重试。SQLite 空间可重复利用，但数据库文件不会立即缩小。单独导出的回放文件不在清理范围内。只有录音处理进程执行保留策略，单独运行 `serve` 不会清理。
+
+48 kHz 单声道 16 位 PCM 每天约 **8.29 GB**，7 天约 **58.06 GB**，需额外预留数据库与运行空间。磁盘满会报错重试。
+
+### 时间与网络边界
+
+文字对应识别句段，包含前后静音，不是逐字时间戳。会话内区间左闭右开，以采样位置关联音频；UTC 时间由会话起点加采样时长计算，建议设备开启 NTP。
+
+本机起点包含设备启动及缓冲延迟。UDP 模式以处理端收到第一块解码音频的时间为起点，不是采集设备的精确时间。Opus 为有损编码，保存的是解码后的音频。
+
+UDP 不含确认、采集端缓存或断网补传；丢包和短暂中断可能造成音频缺失及时间压缩。无包超时或接收缓冲溢出会结束会话，5 秒后重试。采集端进程正常不代表处理端已收到音频。当前没有传输加密或 Web 登录认证，适用于受信任的局域网。
+
+启动时可恢复未关闭 WAV 的数据库结束位置。音频文件与 SQLite 不构成原子事务，硬断电造成的损坏可能需要人工修复。
+
+## 7. systemd 部署
+
+将项目放到 `/opt/mic-spy`，模型放在项目默认目录或在服务中指定绝对路径。先确认前台模式正常，再选择所需服务：
+
+| 服务文件 | 用途 |
+| --- | --- |
+| `deploy/mic-spy-full.service` | 本机全功能；可改为 `--source udp` |
+| `deploy/mic-spy-collector.service` | 采集发送；需修改处理端 IP |
+| `deploy/mic-spy-processor.service` | UDP 识别存储 |
+| `deploy/mic-spy-web.service` | 独立 Web/API |
+| `deploy/mic-spy.service` | 本机录音识别，不含 Web |
+
+全功能部署示例：
 
 ```sh
-uv run mic-spy --data ./data processor --retention-days 7
-uv run mic-spy --data ./data run --retention-days 14
-```
-
-启动时检查一次，运行中每小时检查一次，即使正在等待网络音频也会检查。按照数据库记录的录音分段结束时间判断，严格早于“当前 UTC 时间减去保留天数”才删除；跨越截止时间的整段暂时保留，因此清理可延迟约一小时加一个分段长度。正在写入的 WAV 不会被删除。
-
-删除音频时同步删除与该分段重叠的文字，包括跨文件边界的句子；空的历史会话及目录也会清理。文件删除失败会记录日志、保留数据库记录，下一次检查重试。数据库空间可重复利用，SQLite 文件大小不会立即缩小；独立导出的回放文件不在自动清理范围内。`retention.py` 负责清理逻辑。
-
-## 每分钟批量写盘
-
-`run` 和 `processor` 将音频及识别文字先放在内存中，默认每 60 秒集中写入 WAV，并在一个 SQLite 事务中提交这一批的文字与音频索引。期间不会为每个音频块或每句话写盘。运行时即使暂时没有音频，也会检查是否到达保存时间；正常停止或捕获异常退出会立即保存剩余缓存。首次启动的数据库初始化、会话创建和每小时的过期清理仍会写盘。
-
-```sh
-uv run mic-spy --data ./data processor --flush-seconds 60
-```
-
-48kHz 下每分钟音频缓存约 5.76 MB；查询只能看到已提交的数据，因此识别文字在查询中可能延迟约一分钟出现。WAV 默认仍按 5 分钟分段，保存间隔与文件分段长度互相独立。每批音频写入后刷新并同步文件，再提交 SQLite；操作系统实际物理写入时间由其文件系统管理。突然断电或强制结束进程会丢失尚未保存的内存缓存。
-
-## Web 面板与 HTTP API
-
-前端使用 React + Vite（Node.js 20.19+ 或 22.12+），后端使用 FastAPI。提供关键词检索、时间筛选、分页、录音回放与下载、档案统计，每分钟自动刷新。界面显示浏览器本地时区；查询范围按句段与时间区间是否重叠匹配。
-
-在处理端构建并启动：
-
-```sh
+cd /opt/mic-spy
 uv sync --locked --no-dev
-cd web
-npm ci
-npm run build
-cd ..
-uv run mic-spy --data ./data serve --host 0.0.0.0 --port 8000
+sudo useradd --system --no-create-home --groups audio micspy
+sudo cp deploy/mic-spy-full.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mic-spy-full
+sudo journalctl -u mic-spy-full -f
 ```
 
-浏览器打开 `http://处理设备IP:8000`。录音处理器 `processor` 和 Web 服务 `serve` 是独立进程，需同时运行，且 `--data` 指向同一目录。Web 服务不启动录音，不创建数据库；处理器尚未建立数据库时页面会提示等待数据。单独运行 `serve` 默认只监听 `127.0.0.1`，上述 `0.0.0.0` 用于局域网访问。当前没有登录认证，请部署在受信任的局域网。
+已有 `micspy` 用户时跳过创建步骤。服务用户需要读取项目、虚拟环境和模型。录音服务由 systemd 创建并授权 `/var/lib/mic-spy`；独立 Web 服务需要读取该目录、SQLite WAL 及音频。
 
-生产运行不需要 Node.js 常驻：FastAPI 同时提供 `web/dist` 静态文件与 `/api` 接口。可用 `--web-dist /绝对路径/web/dist` 指定前端目录。常驻配置见 `deploy/mic-spy-web.service`，按前述步骤安装并启用；服务用户需要读取处理端数据库、SQLite WAL 和音频文件。
+默认 Web 启动会自动构建，服务用户需要可用的 npm 及 `web/node_modules`、`web/dist` 写权限。若预先构建，在 service 的 `ExecStart` 末尾加 `--no-build`，即可避免运行时安装依赖。服务直接使用虚拟环境，不执行 uv 安装。
 
-前端开发时，先启动后端，再在 `web` 目录运行 `npm run dev`，打开终端显示的地址。Vite 将 `/api` 请求代理到 `http://127.0.0.1:8000`。
+Ctrl+C/SIGTERM 会保存已处理的缓存并关闭子进程。`full` 的 Web 异常退出会停止全功能模式并返回失败，供 systemd 重启。
 
-| HTTP 接口 | 功能 |
-| --- | --- |
-| `GET /api/health` | 服务与数据库是否存在 |
-| `GET /api/stats` | 句段数量、音频时长、最早与最新记录 |
-| `GET /api/transcripts` | 支持 `text`、`start`、`end`、`session_id`、`limit`（1–100）、`offset` |
-| `GET /api/transcripts/{id}/audio` | 对应 WAV，可跨文件边界，支持字节范围请求与浏览器拖动回放 |
-| `GET /docs` | 交互式 API 文档 |
+## 8. 开发与项目结构
 
-`start` / `end` 接受带时区的 ISO 8601 时间；纳秒字段以字符串输出，避免 JavaScript 精度损失。音频回放在内存中生成，不新增磁盘文件；过期或不完整音频返回 410，缺失文字返回 404。单次回放上限 10 分钟，超过时用命令行导出。只显示已提交的文字与音频，批量写盘带来的延迟约一分钟。
+```text
+src/mic_spy/
+├── cli.py          # 命令与组件组装
+├── contracts.py    # 音频来源、识别器、存储接口
+├── source.py       # ALSA 来源
+├── transport.py    # FFmpeg Opus/UDP 发送与接收
+├── recognition.py  # sherpa-onnx 流式识别
+├── runtime.py      # 采集队列与生命周期
+├── storage.py      # 内存缓存、WAV、SQLite
+├── retention.py    # 过期清理
+├── query.py        # 只读查询、跨文件回放导出
+├── api.py          # HTTP API 与静态页面
+└── web_build.py    # 前端自动安装与构建
+web/                # React + Vite 前端
+```
 
-## 48 kHz 与启动模式
+默认数据目录结构：
 
-`collector`、`run`、`processor` 默认使用 48000 Hz、单声道、16 位 PCM。`--sample-rate 16000` 可切换回旧采样率。网络两端建议采用相同采样率；处理端会让 FFmpeg 将输入流转换为指定的录音采样率。Opus 为有损编码，采样率提高不等于编码后恢复全部原始音质，可根据需要调整 `--bitrate`。
+```text
+data/
+├── archive.sqlite3
+├── capture.lock
+└── audio/<session_id>/<start_sample>.wav
+```
 
-识别器的模型特征采样率仍固定为 16000 Hz，向 sherpa-onnx 输入时携带真实采样率，由其内部重采样；文字采样位置使用录音采样率，回放定位保持一致。已有 16kHz 会话继续按数据库中的采样率回放，无需迁移。
+SQLite 使用 WAL；`sessions` 保存会话与采样率，`recordings` 保存音频路径及采样区间，`transcripts` 保存文字与时间。读取与识别解耦，替换声音来源或识别器时实现 `contracts.py` 接口即可。
 
-| 命令 | 启动功能 |
-| --- | --- |
-| `collector` | 麦克风采集 + 编码 + UDP 发送，不需要模型 |
-| `processor` | UDP 接收 + 识别 + 录音与文字存储 |
-| `run` | 本机麦克风采集 + 识别 + 录音与文字存储 |
-| `serve` | Web 面板 + HTTP API |
-| `full --source local` | 本机采集 + 识别 + 存储 + Web/API |
-| `full --source udp` | UDP 接收 + 识别 + 存储 + Web/API |
-
-先按 Web 章节构建前端，然后一条命令启动全功能：
+安装开发依赖并测试：
 
 ```sh
-# 同一台设备运行全部功能
-uv run mic-spy --data ./data full --source local \
-  --device plughw:0,0 --sample-rate 48000 --host 0.0.0.0 \
-  --model /模型目录/model.int8.onnx --tokens /模型目录/tokens.txt
-
-# 处理设备：接收音频并同时提供 Web
-uv run mic-spy --data ./data full --source udp \
-  --listen udp://0.0.0.0:5000 --sample-rate 48000 --host 0.0.0.0 \
-  --model /模型目录/model.int8.onnx --tokens /模型目录/tokens.txt
-
-# 采集设备：仅发送
-uv run mic-spy collector --device plughw:0,0 \
-  --sample-rate 48000 --target udp://处理设备IP:5000
+uv sync --locked
+uv run pytest
 ```
 
-`full` 默认使用本机麦克风、Web 端口 8000；可用 `--host`、`--port`、`--web-dist` 配置。Ctrl+C/SIGTERM 会停止录音并保存缓存，同时关闭 Web 子进程。Web 异常退出时全功能模式会停止并返回失败状态，方便 systemd 重启。运行 `full` 时不要再针对同一目录启动 `run` / `processor`，也不要在同一端口另外启动 `serve`。
+前端开发：先启动后端 `serve`，再执行 `npm --prefix web run dev`。Vite 将 `/api` 代理到 `http://127.0.0.1:8000`。自动化测试覆盖存储、保留策略、批量写盘、HTTP API、启动模式及 FFmpeg UDP 链路；实际麦克风采集需在目标 Armbian 上验证。
+
+## 9. 常见问题
+
+- **Missing file: model.int8.onnx**：模型不在默认目录。用 `--model`、`--tokens` 指定实际路径；仅发送音频时使用 `collector`。
+- **npm 或前端构建失败**：检查 Node.js 版本、依赖下载网络和目录写权限。预先构建后可用 `--no-build`。
+- **页面没有新记录**：确认处理进程正在运行、Web 与处理使用同一数据目录，并等待一分钟批量写入。
+- **UDP 接收超时**：检查采集端目标 IP、UDP 端口、防火墙及 FFmpeg 日志。
+- **数据目录被占用 / Web 端口被占用**：检查是否同时启动了前台、systemd 或另一个 `full` 实例。
