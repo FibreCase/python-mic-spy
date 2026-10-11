@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './style.css'
+import Recordings from './Recordings'
 
 const PAGE = 30
 const clock = (value) => new Date(value).toLocaleString('zh-CN', { hour12: false })
@@ -73,6 +74,7 @@ function App() {
         <div><span>录音时长</span><strong>{stats ? duration(stats.audio_seconds) : '—'}</strong><p>{stats?.segments ?? '—'} 个音频分段</p></div>
         <div><span>最近记录</span><strong className="last-time">{stats?.newest_time ? new Date(stats.newest_time).toLocaleTimeString('zh-CN', {hour12: false}) : '—'}</strong><p>{stats?.newest_time ? new Date(stats.newest_time).toLocaleDateString('zh-CN') : '等待第一段声音'}</p></div>
       </section>
+      <Recordings revision={revision} onPlay={select}/>
       <section className="archive-panel">
         <div className="panel-title"><h2>识别记录 <span>{total}</span></h2><label className="auto"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)}/> 每分钟刷新</label></div>
         <form onSubmit={search} className="filters">
@@ -93,7 +95,7 @@ function App() {
         <footer className="pagination"><span>{total ? `第 ${Math.floor(offset / PAGE) + 1} 页 · 共 ${total} 条` : '共 0 条'}</span><div><button disabled={offset === 0 || loading} onClick={() => setOffset(v => Math.max(0, v - PAGE))}>← 上一页</button><button disabled={offset + PAGE >= total || loading} onClick={() => setOffset(v => v + PAGE)}>下一页 →</button></div></footer>
       </section>
       <div className="footnote">句段包含前后静音。网络采集时间以处理端接收为基准。</div>
-      {selected && <section className="player" aria-label="录音回放"><div className="player-icon">▶</div><div className="player-copy"><span>{clock(selected.start_time)} · {selected.duration_seconds.toFixed(1)} 秒</span><strong>{selected.text}</strong>{audioError && <p role="alert">{audioError}</p>}</div><audio ref={audio} key={selected.id} controls autoPlay src={selected.audio_url} onError={() => setAudioError('录音无法播放，可能已过期清理。请刷新记录。')}/><a className="download" href={selected.audio_url} download={`recording-${selected.id}.wav`}>下载</a><button className="close" aria-label="关闭回放" onClick={() => { audio.current?.pause(); setSelected(null) }}>×</button></section>}
+      {selected && <section className="player" aria-label="录音回放"><div className="player-icon">▶</div><div className="player-copy"><span>{clock(selected.start_time)} · {selected.duration_seconds.toFixed(1)} 秒</span><strong>{selected.text}</strong>{audioError && <p role="alert">{audioError}</p>}</div><audio ref={audio} key={selected.id} controls autoPlay src={selected.audio_url} onLoadedMetadata={e => { if (selected.seek_seconds) e.currentTarget.currentTime = selected.seek_seconds }} onError={() => setAudioError('录音无法播放，可能已过期清理。请刷新记录。')}/><a className="download" href={selected.audio_url} download={`audio-${selected.id}.wav`}>下载</a><button className="close" aria-label="关闭回放" onClick={() => { audio.current?.pause(); setSelected(null) }}>×</button></section>}
     </main>
   </div>
 }

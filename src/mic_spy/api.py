@@ -5,7 +5,7 @@ import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from .query import connect, export_clip
 
@@ -88,6 +88,68 @@ def create_app(data: Path, web_dist: Path | None = None):
                     'limit': limit, 'offset': offset}
         finally:
             db.close()
+
+    @app.get('/api/recordings')
+    def recordings(start: datetime | None = None, end: datetime | None = None,
+                   at: datetime | None = None, limit: int = Query(30, ge=1, le=100),
+                   offset: int = Query(0, ge=0)):
+        for moment in (start, end, at):
+            if moment is not None and moment.tzinfo is None:
+                raise HTTPException(422, '查询时间必须包含时区')
+        if start and end and start >= end:
+            raise HTTPException(422, '开始时间必须早于结束时间')
+        # Calculate times from samples; silent audio has the same timeline as speech.
+        base = """SELECT r.*,s.sample_rate,
+            s.started_ns + (r.start_sample * 1000000000 / s.sample_rate) AS start_ns,
+            s.started_ns + (r.end_sample * 1000000000 / s.sample_rate) AS end_ns
+            FROM recordings r JOIN sessions s ON s.id=r.session_id
+            WHERE r.end_sample > r.start_sample"""
+        clauses, params = [], []
+        if start:
+            clauses.append('end_ns>?')
+            params.append(int(start.timestamp()*1e9))
+        if end:
+            clauses.append('start_ns<?')
+            params.append(int(end.timestamp()*1e9))
+        if at:
+            clauses.extend(['start_ns<=?', 'end_ns>?'])
+            params.extend([int(at.timestamp()*1e9)]*2)
+        where = ' WHERE '+ ' AND '.join(clauses) if clauses else ''
+        db = database()
+        try:
+            db.execute('BEGIN')
+            total = db.execute('SELECT COUNT(*) FROM ('+base+')'+where,params).fetchone()[0]
+            rows = db.execute('SELECT * FROM ('+base+')'+where+
+                ' ORDER BY start_ns DESC,id DESC LIMIT ? OFFSET ?',params+[limit,offset]).fetchall()
+            items = []
+            for row in rows:
+                item = serialize(row)
+                item.pop('path')
+                item['audio_url'] = f'/api/recordings/{row["id"]}/audio'
+                item['closed'] = bool(row['closed'])
+                item['seek_seconds'] = (int(at.timestamp()*1e9)-row['start_ns'])/1e9 if at else 0
+                items.append(item)
+            return {'items':items, 'total':total, 'limit':limit, 'offset':offset}
+        finally:
+            db.close()
+
+    @app.get('/api/recordings/{recording_id}/audio')
+    def recording_audio(recording_id: int):
+        db = database()
+        try:
+            row = db.execute('SELECT path FROM recordings WHERE id=?',(recording_id,)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            raise HTTPException(404, '录音已删除或不存在')
+        path = (data / row['path']).resolve()
+        if not path.is_relative_to(data / 'audio'):
+            raise HTTPException(410, '录音路径无效')
+        if not path.is_file():
+            raise HTTPException(410, '录音文件已清理')
+        return FileResponse(path, media_type='audio/wav',
+                            headers={'Cache-Control':'no-store'},
+                            filename=f'recording-{recording_id}.wav',content_disposition_type='inline')
 
     @app.get('/api/transcripts/{transcript_id}/audio')
     def audio(transcript_id: int, request: Request):
